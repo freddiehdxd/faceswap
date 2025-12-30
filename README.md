@@ -46,6 +46,45 @@ response and request status updates from the `/status` endpoint until
 you receive the `COMPLETED` status which indicates that your request
 was successful.
 
+### Image Input Formats
+
+Both `source_image` and `target_image` fields support two input formats:
+
+1. **Base64 encoded image data** - The traditional format where you encode your image as a base64 string
+2. **Image URL** - A direct URL to an image (must start with `http://` or `https://`)
+
+You can mix and match formats - for example, use a URL for the source image and base64 for the target image.
+
+### Output Format (Cloudflare R2)
+
+By default, the API returns the result as a base64 encoded image. However, you can configure Cloudflare R2 storage to have the API upload results and return a URL instead. This significantly reduces response payload size.
+
+**Environment Variables for R2:**
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `R2_ENDPOINT` | Cloudflare R2 endpoint URL (e.g., `https://ACCOUNT_ID.r2.cloudflarestorage.com`) | Yes |
+| `R2_ACCESS_KEY_ID` | R2 Access Key ID | Yes |
+| `R2_SECRET_ACCESS_KEY` | R2 Secret Access Key | Yes |
+| `R2_BUCKET` | R2 bucket name (default: `cdn`) | No |
+| `CDN_URL` | Public CDN URL for accessing uploaded files (e.g., `https://cdn.example.com`) | No |
+
+When R2 is configured, the response will contain `image_url` instead of `image`:
+
+```json
+{
+  "image_url": "https://cdn.example.com/faceswap/job-id.jpg"
+}
+```
+
+If R2 is not configured or upload fails, it falls back to returning base64:
+
+```json
+{
+  "image": "base64 encoded output image"
+}
+```
+
 ### RunPod API Examples
 
 * [Swap as many source faces as possible into as many target faces as possible](

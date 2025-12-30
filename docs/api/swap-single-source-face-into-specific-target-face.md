@@ -8,11 +8,34 @@ for example `0` would be the first face, `1` would be the second
 face, and so on.  In the example payload below, the second
 face will be swapped in the target image.
 
+**Note:** Both `source_image` and `target_image` support either base64 encoded image data OR a URL to an image (http:// or https://).
+
+### Using Base64
+
 ```json
 {
   "input": {
     "source_image": "base64 encoded source image content",
     "target_image": "base64 encoded target image content",
+    "source_indexes": "-1",
+    "target_indexes": "1",
+    "background_enhance": true,
+    "face_restore": true,
+    "face_upsample": true,
+    "upscale": 1,
+    "codeformer_fidelity": 0.5,
+    "output_format": "JPEG"
+  }
+}
+```
+
+### Using URLs
+
+```json
+{
+  "input": {
+    "source_image": "https://example.com/source-face.jpg",
+    "target_image": "https://example.com/target-image.jpg",
     "source_indexes": "-1",
     "target_indexes": "1",
     "background_enhance": true,
@@ -38,6 +61,7 @@ face will be swapped in the target image.
 
 ## RUNSYNC
 
+### Response with R2 configured (returns URL)
 
 ```json
 {
@@ -45,7 +69,20 @@ face will be swapped in the target image.
   "executionTime": 43997,
   "id": "sync-a3b54383-e671-4e24-a7bd-c5fec16fda3b",
   "output": {
-    "status": "ok",
+    "image_url": "https://your-cdn.com/faceswap/job-id.jpg"
+  },
+  "status": "COMPLETED"
+}
+```
+
+### Response without R2 (returns base64)
+
+```json
+{
+  "delayTime": 20275,
+  "executionTime": 43997,
+  "id": "sync-a3b54383-e671-4e24-a7bd-c5fec16fda3b",
+  "output": {
     "image": "base64 encoded output image"
   },
   "status": "COMPLETED"

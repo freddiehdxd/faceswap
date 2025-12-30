@@ -1,5 +1,7 @@
 Pillow
 PyYAML
+requests
+boto3
 addict
 future
 insightface>=0.7.3

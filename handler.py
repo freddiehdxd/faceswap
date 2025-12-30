@@ -8,6 +8,8 @@ import insightface
 import numpy as np
 import traceback
 import runpod
+import requests
+import boto3
 from runpod.serverless.utils.rp_validator import validate
 from runpod.serverless.modules.rp_logger import RunPodLogger
 from typing import List, Union
@@ -18,6 +20,32 @@ from schemas.input import INPUT_SCHEMA
 FACE_SWAP_MODEL = 'checkpoints/inswapper_128.onnx'
 TMP_PATH = '/tmp/inswapper'
 logger = RunPodLogger()
+
+# ---------------------------------------------------------------------------- #
+# R2 Configuration                                                              #
+# ---------------------------------------------------------------------------- #
+R2_ENDPOINT = os.getenv("R2_ENDPOINT")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+R2_BUCKET = os.getenv("R2_BUCKET", "cdn")
+CDN_URL = os.getenv("CDN_URL", "")
+
+# Initialize R2 client
+r2_client = None
+if R2_ENDPOINT and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
+    try:
+        r2_client = boto3.client(
+            's3',
+            endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            region_name='auto'
+        )
+        logger.info("R2 client initialized successfully")
+    except Exception as e:
+        logger.error(f"R2 initialization failed: {e}")
+else:
+    logger.info("R2 not configured - will return base64 output")
 
 
 # ---------------------------------------------------------------------------- #
@@ -304,10 +332,21 @@ def face_swap(job_id: str,
         output_buffer = io.BytesIO()
         result_image.save(output_buffer, format=output_format)
         image_data = output_buffer.getvalue()
-        encoded_image = base64.b64encode(image_data).decode('utf-8')
 
+        # Try to upload to R2 if configured
+        if r2_client:
+            logger.info('Uploading result to R2...', job_id)
+            public_url = upload_to_r2(image_data, job_id, output_format)
+            if public_url:
+                logger.info(f'Result uploaded to R2: {public_url}', job_id)
+                return {'image_url': public_url}
+            else:
+                logger.info('R2 upload failed, falling back to base64', job_id)
+
+        # Fallback to base64 if R2 not configured or upload failed
+        encoded_image = base64.b64encode(image_data).decode('utf-8')
         logger.debug(f'Output image size: {len(encoded_image)} characters', job_id)
-        return encoded_image
+        return {'image': encoded_image}
     except Exception as e:
         logger.error(f'Failed to encode output image: {str(e)}', job_id)
         raise Exception(f'Failed to encode output image: {str(e)}')
@@ -326,6 +365,109 @@ def determine_file_extension(image_data):
         image_extension = '.png'
 
     return image_extension
+
+
+def is_url(string: str) -> bool:
+    """Check if a string is a URL."""
+    return string.startswith('http://') or string.startswith('https://')
+
+
+def download_image_from_url(url: str, job_id: str) -> tuple:
+    """
+    Download an image from a URL and return the image bytes and file extension.
+    
+    Args:
+        url: The URL to download the image from
+        job_id: The job ID for logging
+        
+    Returns:
+        tuple: (image_bytes, file_extension)
+    """
+    try:
+        logger.info(f'Downloading image from URL: {url}', job_id)
+        response = requests.get(url, timeout=30, stream=True)
+        response.raise_for_status()
+        
+        # Get content type to determine file extension
+        content_type = response.headers.get('Content-Type', '').lower()
+        
+        if 'jpeg' in content_type or 'jpg' in content_type:
+            file_extension = '.jpg'
+        elif 'png' in content_type:
+            file_extension = '.png'
+        elif 'gif' in content_type:
+            file_extension = '.gif'
+        elif 'webp' in content_type:
+            file_extension = '.webp'
+        else:
+            # Try to determine from URL
+            url_lower = url.lower()
+            if '.jpg' in url_lower or '.jpeg' in url_lower:
+                file_extension = '.jpg'
+            elif '.png' in url_lower:
+                file_extension = '.png'
+            elif '.gif' in url_lower:
+                file_extension = '.gif'
+            elif '.webp' in url_lower:
+                file_extension = '.webp'
+            else:
+                # Default to png
+                file_extension = '.png'
+        
+        image_bytes = response.content
+        logger.info(f'Successfully downloaded image ({len(image_bytes)} bytes)', job_id)
+        return image_bytes, file_extension
+        
+    except requests.exceptions.Timeout:
+        raise Exception(f'Timeout while downloading image from URL: {url}')
+    except requests.exceptions.RequestException as e:
+        raise Exception(f'Failed to download image from URL: {url} - {str(e)}')
+
+
+def upload_to_r2(image_data: bytes, job_id: str, output_format: str = 'JPEG') -> str:
+    """
+    Upload image to Cloudflare R2 and return public URL.
+    
+    Args:
+        image_data: The image bytes to upload
+        job_id: The job ID for the filename
+        output_format: The image format (JPEG or PNG)
+        
+    Returns:
+        str: Public URL of the uploaded image, or None if upload failed
+    """
+    if not r2_client:
+        return None
+    
+    try:
+        # Determine file extension and content type
+        if output_format.upper() == 'PNG':
+            file_ext = 'png'
+            content_type = 'image/png'
+        else:
+            file_ext = 'jpg'
+            content_type = 'image/jpeg'
+        
+        # Generate unique filename
+        file_name = f"faceswap/{job_id}.{file_ext}"
+        
+        # Upload to R2
+        r2_client.put_object(
+            Bucket=R2_BUCKET,
+            Key=file_name,
+            Body=image_data,
+            ContentType=content_type
+        )
+        
+        # Construct public URL
+        public_url = f"{CDN_URL}/{file_name}"
+        logger.info(f"Uploaded to R2: {public_url}")
+        
+        return public_url
+    
+    except Exception as e:
+        logger.error(f"R2 upload failed: {e}")
+        return None
 
 
 def clean_up_temporary_files(source_image_path: str, target_image_path: str):
@@ -354,30 +496,42 @@ def face_swap_api(job_id: str, job_input: dict):
         source_image_data = job_input['source_image']
         target_image_data = job_input['target_image']
 
-        # Decode the source image data
+        # Process source image (URL or base64)
         try:
-            source_image = base64.b64decode(source_image_data)
-            source_file_extension = determine_file_extension(source_image_data)
+            if is_url(source_image_data):
+                # Download from URL
+                source_image, source_file_extension = download_image_from_url(source_image_data, job_id)
+            else:
+                # Decode from base64
+                source_image = base64.b64decode(source_image_data)
+                source_file_extension = determine_file_extension(source_image_data)
+            
             source_image_path = f'{TMP_PATH}/source_{unique_id}{source_file_extension}'
 
             # Save the source image to disk
             with open(source_image_path, 'wb') as source_file:
                 source_file.write(source_image)
         except Exception as e:
-            logger.error(f'Failed to decode/save source image: {str(e)}', job_id)
+            logger.error(f'Failed to process source image: {str(e)}', job_id)
             raise Exception(f'Invalid source image data: {str(e)}')
 
-        # Decode the target image data
+        # Process target image (URL or base64)
         try:
-            target_image = base64.b64decode(target_image_data)
-            target_file_extension = determine_file_extension(target_image_data)
+            if is_url(target_image_data):
+                # Download from URL
+                target_image, target_file_extension = download_image_from_url(target_image_data, job_id)
+            else:
+                # Decode from base64
+                target_image = base64.b64decode(target_image_data)
+                target_file_extension = determine_file_extension(target_image_data)
+            
             target_image_path = f'{TMP_PATH}/target_{unique_id}{target_file_extension}'
 
             # Save the target image to disk
             with open(target_image_path, 'wb') as target_file:
                 target_file.write(target_image)
         except Exception as e:
-            logger.error(f'Failed to decode/save target image: {str(e)}', job_id)
+            logger.error(f'Failed to process target image: {str(e)}', job_id)
             try:
                 clean_up_temporary_files(source_image_path, target_image_path)
             except:
@@ -422,9 +576,8 @@ def face_swap_api(job_id: str, job_input: dict):
         except Exception as cleanup_error:
             logger.error(f'Failed to clean up temporary files: {str(cleanup_error)}', job_id)
 
-        return {
-            'image': result_image
-        }
+        # result_image is now a dict with either 'image_url' or 'image' key
+        return result_image
     except Exception as e:
         logger.error(f'Face swap API error: {str(e)}', job_id)
         logger.debug(f'Error traceback: {traceback.format_exc()}', job_id)
