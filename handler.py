@@ -599,6 +599,10 @@ def face_swap_api(job_id: str, job_input: dict):
 # RunPod Handler                                                               #
 # ---------------------------------------------------------------------------- #
 def handler(event):
+    # Health check / warmup - return immediately if no input
+    if not event or "input" not in event:
+        return {"status": "ok"}
+    
     job_id = event['id']
     validated_input = validate(event['input'], INPUT_SCHEMA)
 
